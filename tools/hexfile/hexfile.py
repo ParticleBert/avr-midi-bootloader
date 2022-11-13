@@ -40,7 +40,7 @@ def LoadHexFile(lines):
       logging.info('Line %(line_number)d: unknown character' % locals())
       return None
 
-    bytes = [int(line[i:i+2], 16) for i in xrange(1, len(line), 2)]
+    bytes = [int(line[i:i+2], 16) for i in range(1, len(line), 2)]
     if bytes[0] != len(bytes) - 5:
       logging.info('Line %(line_number)d: invalid byte count' % locals())
       return None
