@@ -49,19 +49,19 @@ def LoadHexFile(lines):
       logging.info('Line %(line_number)d: corrupted line' % locals())
       return None
 
-    if bytes[3] == 1:
+    if bytes[3] == 1: # Record Type: End-Of-File
       if bytes[0] != 0 or bytes[1] != 0 or bytes[2] != 0:
         logging.info('Line %(line_number)d: invalid end of file' % locals())
         return None
       else:
         break
-    elif bytes[3] == 0:
+    elif bytes[3] == 0: # Start Segment Address Record (Type 3)
       address = offset << 16 | bytes[1] << 8 | bytes[2]
       padding_size = address + bytes[0] - len(data)
       if padding_size > 0:
         data += [0] * padding_size
       data[address:address + bytes[0]] = bytes[4:-1]
-    elif bytes[3] == 4:
+    elif bytes[3] == 4: # Extended Linear Address Record (Type 4)
       address = bytes[4] << 8 | bytes[5]
       if base_address is None:
         base_address = address
@@ -74,7 +74,7 @@ def LoadHexFile(lines):
 def WriteHexFile(data, file_object, chunk_size=32):
   """Writes a Hex file."""
 
-  for address in xrange(0, len(data), chunk_size):
+  for address in range(0, len(data), chunk_size):
     chunk = data[address:address+chunk_size]
     chunk_len = len(chunk)
     address_l = address & 255

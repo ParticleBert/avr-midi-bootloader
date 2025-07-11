@@ -42,12 +42,15 @@ sys.path.append('.')
 from tools.midi import midifile
 from tools.hexfile import hexfile
 
+def strings_to_hex(strings):
+    return [s.encode('utf-8').hex() for s in strings]
 
 def CreateMidifile(
         input_file_name,
         data,
         output_file,
         options):
+
     size = len(data)
     page_size = options.page_size
     delay = options.delay
@@ -58,41 +61,57 @@ def CreateMidifile(
         'Size: %(size)d' % locals(),
         'Page size: %(page_size)d' % locals(),
         'Delay: %(delay)d ms' % locals()]
-    m = midifile.Writer()
+    
+    m = midifile.Writer() # create a Writer-Object
     if options.write_comments:
         for comment in comments:
             m.AddTrack().AddEvent(0, midifile.TextEvent(comment))
-    t = m.AddTrack()
+    t = m.AddTrack() # Add a track
     t.AddEvent(0, midifile.TempoEvent(120.0))
     page_size *= 2  # Converts from words to bytes
     # The first SysEx block must not start at 0! Sequencers like Logic play the
     # first SysEx block everytime stop/play is pressed.
     time = 1
     syx_data = []
-    for i in range(0, size, page_size):
-        block = ''.join(map(chr, data[i:i + page_size]))
+
+    for i in range(0, size, page_size): # runs from 0 to "size", in "page_size"-sized steps
+        block = ''.join(map(chr, data[i:i + page_size])) # convert page from int to unicode
         padding = page_size - len(block)
-        block += '\x00' * padding
+        block += '\x00' * padding # Fill with zeroes if there is less data than page size
         mfr_id = options.manufacturer_id if not \
             options.force_obsolete_manufacturer_id else '\x00\x20\x77'
-        event = midifile.SysExEvent(
+        event = midifile.SysExEvent( # 1) create an SysExEvent object
             mfr_id,
-            struct.pack('>h', options.device_id),
+            # struct.pack('>h', options.device_id), # Original
+            options.device_id,
+            # update_command added up front and the checksum at the end
+            # update_command is ~\x00: 7E 00
             options.update_command + midifile.Nibblize(block))
-        t.AddEvent(time, event)
-        syx_data.append(event.raw_message)
+        # print("Data: ", strings_to_hex(event.data), "\r\n")
+        # print("Raw Message: ", strings_to_hex(event.raw_message), "\r\n")        
+        # print("Message: ", strings_to_hex(event.message), "\r\n")
+
+        t.AddEvent(time, event) # 2) add SysExEvent to the track
+        syx_data.append(event.raw_message) # copy raw_message in syx_data
         # ms -> s -> beats -> ticks
         time += int(delay / 1000.0 / 0.5 * 96)
+
     event = midifile.SysExEvent(
         mfr_id,
-        struct.pack('>h', options.device_id),
+        # options.device_id is a 2
+        # struct.pack('>h', options.device_id), # ORIGINAL
+        options.device_id,
         options.reset_command)
     t.AddEvent(time, event)
     syx_data.append(event.raw_message)
 
-    f = open(output_file, 'w') # b means open in binary
+    f = open(output_file, 'wb') # b means open in binary
     if options.syx:
-        f.write(''.join(syx_data))  # a byte-like object is required, not 'str'
+        syx_joined = b''
+        for i in syx_data:
+            syx_joined = syx_joined + i
+        
+        f.write(syx_joined)
     else:
         m.Write(f, format=1)
     f.close()
@@ -126,7 +145,7 @@ if __name__ == '__main__':
         '--manufacturer_id',
         dest='manufacturer_id',
         type='str',
-        default='\x00\x21\x02',
+        default=b'\x00\x21\x02',
         help='Manufacturer ID to use in SysEx message')
     parser.add_option(
         '-b',
@@ -140,7 +159,7 @@ if __name__ == '__main__':
         '--device_id',
         dest='device_id',
         type='str',
-        default=2,
+        default=b'\x7F',
         help='Device ID to use in SysEx message')
     parser.add_option(
         '-u',
@@ -174,9 +193,8 @@ if __name__ == '__main__':
         logging.fatal('Specify one, and only one firmware .hex file!')
         sys.exit(1)
 
-    print(args[0])  # DEBUG
-    # data = hexfile.LoadHexFile(file(args[0])) # war
-    data = hexfile.LoadHexFile(open(args[0]))
+    # Load data from HEX-File
+    data = hexfile.LoadHexFile(open(args[0])) # data is a list containing integers
     if not data:
         logging.fatal('Error while loading .hex file')
         sys.exit(2)
@@ -187,9 +205,10 @@ if __name__ == '__main__':
             output_file = args[0].replace('.hex', '.mid')
         else:
             output_file = args[0] + '.mid'
+    print("\r\n")
 
     CreateMidifile(
-        args[0],
-        data,
-        output_file,
-        options)
+        args[0],        # arguments
+        data,           # the HEX-Data. Again, a list containing integers
+        output_file,    # the output-file
+        options)        # options

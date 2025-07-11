@@ -52,6 +52,8 @@ def PackVariableLengthInteger(value):
     output = ''.join(map(chr, output))
     return output
 
+def strings_to_hex(strings):
+    return [s.encode('utf-8').hex() for s in strings]
 
 """Classes representing a MIDI event, with a Serialize method which encodes
 them into a string."""
@@ -267,20 +269,43 @@ class StopEvent(SystemEvent):
 
 
 # TODO(pichenettes): also support pauses within a block transmission (F7)
+# The class SysExEvent inherits from the class Event
+# self.data is the nibblized data, update command up front, checksum last
 class SysExEvent(Event):
     def __init__(self, manufacturer_id, device_id, data):
-        self.data = data
-        self.message = ''.join([
-            manufacturer_id,            # String
-            # device_id,                  # Byte
-            data,
-            '\xf7'])
-        self.raw_message = '\xf0' + self.message
-        assert all(ord(x) < 128 for x in self.message[:-1])
-        self.message = ''.join([
-            '\xf0',
-            PackVariableLengthInteger(len(self.message)),
-            self.message])
+        # self.data consists of:
+        # update_command + nibblized firmwareblock with checksum
+        self.data = bytes(data, "utf-8")
+
+        # self.message consists of:
+        # self.data + 0xF7
+        self.message = self.data + b'\xF7'
+
+        # self.raw_message consists of:
+        # 0xF0 + manufacturer_id + self.message + 0xF7
+
+        # self.raw_message is:
+        # o 0xF0
+        # o manufacturer_id
+        # o device_id
+        #   o update command
+        #   o the nibblized firmwareblock
+        #   o checksum
+        # o 0xF7
+        # self.raw_message = "\xf0" + self.message # FIXME Here is the bug
+        # FIXME the program takes F0 wörtlich und fügt 0x46 0x30 ein
+        # print("Manufacturer id: ", manufacturer_id.encode().hex(),"\r\n" )
+        # print("Device id: ", device_id.encode().hex(), "\r\n")        
+        self.raw_message = b'\xF0' + manufacturer_id.to_bytes(1, "big") + device_id.to_bytes(1, "big") + self.message
+        print("Raw Message: ", self.raw_message.hex(), "\r\n")
+        # check that all values are <128
+        # assert all(ord(x) < 128 for x in self.message[:-1])
+        # self.message is now:
+        # o 0xF0
+        # o the lenght of self.message (?)
+        # o self.message\
+        print(PackVariableLengthInteger(len(self.message)).encode("utf-8").hex())
+        self.message = b'\xF0' + PackVariableLengthInteger(len(self.message)).encode("utf-8") + self.message
 
     def Serialize(self, running_status):
         return self.message, None
@@ -545,6 +570,6 @@ if __name__ == '__main__':
         '\x00\x01',
         '\x7f\x7f' + Nibblize('\xff\x00\xcc')))
 
-    f = file('output.mid', 'wb')
+    f = open('output.mid', 'wb')
     m.Write(f, format=0)
     f.close()
