@@ -1,214 +1,250 @@
-#!/usr/bin/python2.5
-#
-# Copyright 2009 Emilie Gillet.
-#
-# Author: Emilie Gillet (emilie.o.gillet@gmail.com)
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-#
-# -----------------------------------------------------------------------------
-#
-# Hex2SysEx utility
-
-"""Hex2SysEx utility.
+#!/usr/bin/env python3
+"""Hex2SysEx utility - Python 3 version.
 
 usage:
   python hex2sysex.py \
-    [--page_size 128] \
+    [--page_size 64] \
     [--delay 250] \
     [--syx] \
-    [--output_file path_to/firmware.mid] \
+    [--device_id 127] \
+    [--output_file path_to/firmware.syx] \
     path_to/firmware.hex
 """
 
-import logging
-import optparse  # Deprecated, use argparse
+import argparse
 import os
 import struct
 import sys
 
-# Allows the code to be run from the project root directory
-sys.path.append('.')
 
-from tools.midi import midifile
-from tools.hexfile import hexfile
+def nibblize(data):
+    """Convert bytes to nibble-encoded bytes for MIDI transmission."""
+    result = bytearray()
+    for byte in data:
+        result.append((byte >> 4) & 0x0F)  # High nibble
+        result.append(byte & 0x0F)         # Low nibble
+    return bytes(result)
 
-def strings_to_hex(strings):
-    return [s.encode('utf-8').hex() for s in strings]
 
-def CreateMidifile(
-        input_file_name,
-        data,
-        output_file,
-        options):
+def calculate_checksum(data):
+    """Calculate simple checksum (sum of all bytes)."""
+    return sum(data) & 0xFF
 
-    size = len(data)
-    page_size = options.page_size
-    delay = options.delay
-    _, input_file_name = os.path.split(input_file_name)
-    comments = [
-        'Warning: contains OS data!',
-        'Created from %(input_file_name)s' % locals(),
-        'Size: %(size)d' % locals(),
-        'Page size: %(page_size)d' % locals(),
-        'Delay: %(delay)d ms' % locals()]
+
+def load_hex_file(filename):
+    """Load Intel HEX file and return data as bytes."""
+    data = bytearray()
+    max_addr = 0
     
-    m = midifile.Writer() # create a Writer-Object
-    if options.write_comments:
-        for comment in comments:
-            m.AddTrack().AddEvent(0, midifile.TextEvent(comment))
-    t = m.AddTrack() # Add a track
-    t.AddEvent(0, midifile.TempoEvent(120.0))
-    page_size *= 2  # Converts from words to bytes
-    # The first SysEx block must not start at 0! Sequencers like Logic play the
-    # first SysEx block everytime stop/play is pressed.
-    time = 1
-    syx_data = []
+    try:
+        with open(filename, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or not line.startswith(':'):
+                    continue
+                    
+                try:
+                    # Parse Intel HEX line
+                    byte_count = int(line[1:3], 16)
+                    address = int(line[3:7], 16)
+                    record_type = int(line[7:9], 16)
+                    
+                    if record_type == 0x00:  # Data record
+                        # Extract data bytes
+                        for i in range(byte_count):
+                            byte_pos = 9 + i * 2
+                            byte_val = int(line[byte_pos:byte_pos + 2], 16)
+                            
+                            # Extend data array if needed
+                            while len(data) <= address + i:
+                                data.append(0xFF)
+                            
+                            data[address + i] = byte_val
+                            max_addr = max(max_addr, address + i)
+                            
+                    elif record_type == 0x01:  # End of file
+                        break
+                        
+                except ValueError as e:
+                    print(f"Error parsing line {line_num}: {e}")
+                    return None
+                    
+    except FileNotFoundError:
+        print(f"Error: File '{filename}' not found")
+        return None
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return None
+    
+    # Trim data to actual size
+    return bytes(data[:max_addr + 1])
 
-    for i in range(0, size, page_size): # runs from 0 to "size", in "page_size"-sized steps
-        block = ''.join(map(chr, data[i:i + page_size])) # convert page from int to unicode
-        padding = page_size - len(block)
-        block += '\x00' * padding # Fill with zeroes if there is less data than page size
-        mfr_id = options.manufacturer_id if not \
-            options.force_obsolete_manufacturer_id else '\x00\x20\x77'
-        event = midifile.SysExEvent( # 1) create an SysExEvent object
-            mfr_id,
-            # struct.pack('>h', options.device_id), # Original
-            options.device_id,
-            # update_command added up front and the checksum at the end
-            # update_command is ~\x00: 7E 00
-            options.update_command + midifile.Nibblize(block))
-        # print("Data: ", strings_to_hex(event.data), "\r\n")
-        # print("Raw Message: ", strings_to_hex(event.raw_message), "\r\n")        
-        # print("Message: ", strings_to_hex(event.message), "\r\n")
 
-        t.AddEvent(time, event) # 2) add SysExEvent to the track
-        syx_data.append(event.raw_message) # copy raw_message in syx_data
-        # ms -> s -> beats -> ticks
-        time += int(delay / 1000.0 / 0.5 * 96)
-
-    event = midifile.SysExEvent(
-        mfr_id,
-        # options.device_id is a 2
-        # struct.pack('>h', options.device_id), # ORIGINAL
-        options.device_id,
-        options.reset_command)
-    t.AddEvent(time, event)
-    syx_data.append(event.raw_message)
-
-    f = open(output_file, 'wb') # b means open in binary
-    if options.syx:
-        syx_joined = b''
-        for i in syx_data:
-            syx_joined = syx_joined + i
+def create_sysex_message(manufacturer_id, device_id, command, data):
+    """Create a complete SysEx message."""
+    # Start with SysEx header
+    message = bytearray([0xF0])  # SysEx start
+    
+    # Add manufacturer ID (3 bytes)
+    message.extend(manufacturer_id)
+    
+    # Add device ID (2 bytes, big-endian)
+    message.extend(struct.pack('>H', device_id))
+    
+    # Add command (2 bytes)
+    message.extend(command)
+    
+    # Add nibblized data
+    if data:
+        nibbled_data = nibblize(data)
+        message.extend(nibbled_data)
         
-        f.write(syx_joined)
+        # Add checksum
+        checksum = calculate_checksum(data)
+        message.extend(nibblize(bytes([checksum])))
+    
+    # End SysEx
+    message.append(0xF7)
+    
+    return bytes(message)
+
+
+def create_sysex_file(input_file, output_file, options):
+    """Create SysEx file from Intel HEX file."""
+    print(f"Loading HEX file: {input_file}")
+    data = load_hex_file(input_file)
+    
+    if not data:
+        print("Failed to load HEX file")
+        return False
+    
+    print(f"Loaded {len(data)} bytes")
+    
+    # Prepare manufacturer ID
+    manufacturer_id = bytes([0x00, 0x21, 0x02])  # Mutable Instruments
+    
+    # Commands
+    update_command = bytes([0x7E, 0x00])  # Flash write command
+    reset_command = bytes([0x7F, 0x00])   # Reset command
+    
+    sysex_data = bytearray()
+    page_size = options.page_size
+    
+    print(f"Creating SysEx with page size: {page_size} bytes")
+    
+    # Process data in pages
+    pages_written = 0
+    for i in range(0, len(data), page_size):
+        # Get page data
+        page_data = data[i:i + page_size]
+        
+        # Pad page to full size
+        if len(page_data) < page_size:
+            page_data += bytes([0x00] * (page_size - len(page_data)))
+        
+        # Create SysEx message for this page
+        sysex_msg = create_sysex_message(
+            manufacturer_id,
+            options.device_id,
+            update_command,
+            page_data
+        )
+        
+        sysex_data.extend(sysex_msg)
+        pages_written += 1
+        
+        if pages_written % 16 == 0:
+            print(f"Processed {pages_written} pages...")
+    
+    # Add reset command
+    reset_msg = create_sysex_message(
+        manufacturer_id,
+        options.device_id,
+        reset_command,
+        None  # No data for reset
+    )
+    sysex_data.extend(reset_msg)
+    
+    # Write output file
+    try:
+        with open(output_file, 'wb') as f:
+            f.write(sysex_data)
+        print(f"Created SysEx file: {output_file}")
+        print(f"Total size: {len(sysex_data)} bytes")
+        print(f"Pages written: {pages_written}")
+        return True
+    except Exception as e:
+        print(f"Error writing output file: {e}")
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Convert Intel HEX to MIDI SysEx for bootloader'
+    )
+    
+    parser.add_argument(
+        'input_file',
+        help='Input Intel HEX file'
+    )
+    
+    parser.add_argument(
+        '-p', '--page_size',
+        type=int,
+        default=64,
+        help='Flash page size in bytes (default: 64)'
+    )
+    
+    parser.add_argument(
+        '-d', '--device_id',
+        type=int,
+        default=127,
+        help='Device ID for SysEx (default: 127)'
+    )
+    
+    parser.add_argument(
+        '-o', '--output_file',
+        default=None,
+        help='Output SysEx file (default: input.syx)'
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine output filename
+    if args.output_file:
+        output_file = args.output_file
     else:
-        m.Write(f, format=1)
-    f.close()
+        base_name = os.path.splitext(args.input_file)[0]
+        output_file = base_name + '.syx'
+    
+    # Validate inputs
+    if not os.path.exists(args.input_file):
+        print(f"Error: Input file '{args.input_file}' not found")
+        sys.exit(1)
+    
+    if args.page_size <= 0 or args.page_size > 256:
+        print("Error: Page size must be between 1 and 256")
+        sys.exit(1)
+    
+    if args.device_id < 0 or args.device_id > 16383:
+        print("Error: Device ID must be between 0 and 16383")
+        sys.exit(1)
+    
+    # Create SysEx file
+    success = create_sysex_file(args.input_file, output_file, args)
+    
+    if success:
+        print("Conversion completed successfully!")
+    else:
+        print("Conversion failed!")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
-    parser = optparse.OptionParser()
-    parser.add_option(
-        '-p',
-        '--page_size',
-        dest='page_size',
-        type='int',
-        default=128,
-        help='Flash page size in words')
-    parser.add_option(
-        '-d',
-        '--delay',
-        dest='delay',
-        type='int',
-        default=250,
-        help='Delay between pages in milliseconds')
-    parser.add_option(
-        '-o',
-        '--output_file',
-        dest='output_file',
-        default=None,
-        help='Write output file to FILE',
-        metavar='FILE')
-    parser.add_option(
-        '-m',
-        '--manufacturer_id',
-        dest='manufacturer_id',
-        type='str',
-        default=b'\x00\x21\x02',
-        help='Manufacturer ID to use in SysEx message')
-    parser.add_option(
-        '-b',
-        '--obsolete_manufacturer_id',
-        dest='force_obsolete_manufacturer_id',
-        default=False,
-        action='store_true',
-        help='Force the use of the manufacturer ID used in early products')
-    parser.add_option(
-        '-v',
-        '--device_id',
-        dest='device_id',
-        type='str',
-        default=b'\x7F',
-        help='Device ID to use in SysEx message')
-    parser.add_option(
-        '-u',
-        '--update_command',
-        dest='update_command',
-        default='\x7e\x00',
-        help='OS update SysEx command')
-    parser.add_option(
-        '-r',
-        '--reset_command',
-        dest='reset_command',
-        default='\x7f\x00',
-        help='Post-OS update reset SysEx command')
-    parser.add_option(
-        '-s',
-        '--syx',
-        dest='syx',
-        action='store_true',
-        default=False,
-        help='Produces a .syx file instead of a MIDI file')
-    parser.add_option(
-        '-c',
-        '--comments',
-        dest='write_comments',
-        action='store_true',
-        default=False,
-        help='Store additional technical gibberish')
-
-    options, args = parser.parse_args()
-    if len(args) != 1:
-        logging.fatal('Specify one, and only one firmware .hex file!')
-        sys.exit(1)
-
-    # Load data from HEX-File
-    data = hexfile.LoadHexFile(open(args[0])) # data is a list containing integers
-    if not data:
-        logging.fatal('Error while loading .hex file')
-        sys.exit(2)
-
-    output_file = options.output_file
-    if not output_file:
-        if '.hex' in args[0]:
-            output_file = args[0].replace('.hex', '.mid')
-        else:
-            output_file = args[0] + '.mid'
-    print("\r\n")
-
-    CreateMidifile(
-        args[0],        # arguments
-        data,           # the HEX-Data. Again, a list containing integers
-        output_file,    # the output-file
-        options)        # options
+    main()
